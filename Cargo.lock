@@ -7268,12 +7268,10 @@ name = "turso_cli"
 version = "0.8.0-pre.7"
 dependencies = [
  "anyhow",
- "bytes",
  "cfg-if",
  "clap",
  "clap_complete",
  "comfy-table",
- "crc32c",
  "csv",
  "ctrlc",
  "dirs 5.0.1",
@@ -7285,9 +7283,7 @@ dependencies = [
  "miette",
  "mimalloc",
  "nu-ansi-term",
- "prost 0.14.1",
  "rand 0.8.6",
- "roaring",
  "rustyline",
  "schemars 0.8.22",
  "serde",
@@ -7302,7 +7298,7 @@ dependencies = [
  "tracing-subscriber",
  "turso_core",
  "turso_parser",
- "turso_sync_engine",
+ "turso_sync_server",
  "validator",
  "windows-sys 0.61.2",
 ]
@@ -7436,6 +7432,7 @@ dependencies = [
  "tracing-subscriber",
  "turso_core",
  "turso_parser",
+ "turso_sync_server",
 ]
 
 [[package]]
@@ -7699,6 +7696,21 @@ dependencies = [
  "turso_core",
  "turso_sdk_kit",
  "turso_sdk_kit_macros",
+ "turso_sync_engine",
+]
+
+[[package]]
+name = "turso_sync_server"
+version = "0.8.0-pre.7"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "crc32c",
+ "prost 0.14.1",
+ "roaring",
+ "serde_json",
+ "tracing",
+ "turso_core",
  "turso_sync_engine",
 ]
 

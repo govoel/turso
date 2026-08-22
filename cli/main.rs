@@ -9,7 +9,6 @@ mod manual;
 mod mcp_server;
 mod opcodes_dictionary;
 mod read_state_machine;
-mod sync_server;
 
 #[cfg(feature = "mvcc_repl")]
 mod mvcc_repl;
@@ -22,7 +21,7 @@ use std::{
     sync::{atomic::Ordering, LazyLock},
 };
 
-use crate::sync_server::TursoSyncServer;
+use turso_sync_server::TursoSyncServer;
 
 #[cfg(all(feature = "mimalloc", not(target_family = "wasm"), not(miri)))]
 #[global_allocator]

@@ -274,6 +274,7 @@ impl SyncEngine {
                 tracing: opts.tracing.clone(),
                 experimental: opts.experimental.clone(),
                 encryption: None, // Local encryption not supported in sync mode
+                disable_wal_auto_actions: None,
             }),
         )?));
         let opts_filled = SyncEngineOptsFilled {
