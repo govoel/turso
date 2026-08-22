@@ -25,6 +25,7 @@ use std::{
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use turso_core::SqliteDialect;
+use turso_sync_server::{HttpResponse as CoreSyncResponse, TursoSyncHandler};
 
 /// Shared ownership of a `turso_core::Statement` that can be explicitly finalized.
 ///
@@ -69,6 +70,7 @@ pub struct DatabaseInner {
     /// `close()` upgrades each live handle and sets it to `None`, which
     /// finalizes the statement and releases its `Arc<Connection>`.
     stmts: Mutex<Vec<Weak<RefCell<Option<turso_core::Statement>>>>>,
+    sync_handler: OnceLock<Arc<TursoSyncHandler>>,
 }
 
 pub struct DatabaseConnect {
@@ -130,6 +132,51 @@ impl Task for DbTask {
     }
 }
 
+#[napi(object)]
+pub struct SyncRequest {
+    pub method: String,
+    pub path: String,
+    pub body: Option<Buffer>,
+}
+
+#[napi(object)]
+pub struct SyncResponse {
+    pub status: u16,
+    pub content_type: String,
+    pub body: Buffer,
+}
+
+/// Runs one sync request away from the JavaScript event loop.
+pub struct SyncRequestTask {
+    handler: Arc<TursoSyncHandler>,
+    method: String,
+    path: String,
+    body: Vec<u8>,
+}
+
+// turso_core's connection is not fully thread-safe yet. JavaScript callers
+// serialize this task with every other operation on the same Database.
+unsafe impl Send for SyncRequestTask {}
+
+impl Task for SyncRequestTask {
+    type Output = CoreSyncResponse;
+    type JsValue = SyncResponse;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        Ok(self
+            .handler
+            .handle_request(&self.method, &self.path, &self.body))
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(SyncResponse {
+            status: output.status,
+            content_type: output.content_type,
+            body: Buffer::from(output.body),
+        })
+    }
+}
+
 /// Supported encryption ciphers for local database encryption.
 #[napi]
 #[derive(Clone, Copy)]
@@ -181,6 +228,10 @@ pub struct DatabaseOpts {
     pub experimental: Option<Vec<String>>,
     /// Optional encryption configuration for local database encryption
     pub encryption: Option<EncryptionOpts>,
+    /// Disable automatic WAL maintenance (auto-checkpoint and WAL header
+    /// restart) at connect time. Required for databases served through
+    /// `handleSyncRequest()` so sync revisions are never checkpointed away.
+    pub disable_wal_auto_actions: Option<bool>,
 }
 
 #[napi(object)]
@@ -359,6 +410,14 @@ fn connect_sync(db: &DatabaseInner) -> napi::Result<()> {
     if let Some(query_timeout) = query_timeout {
         conn.set_query_timeout(query_timeout);
     }
+    if db
+        .opts
+        .as_ref()
+        .and_then(|opts| opts.disable_wal_auto_actions)
+        .unwrap_or(false)
+    {
+        conn.wal_auto_actions_disable();
+    }
 
     let connect = DatabaseConnect {
         _db: Some(db_core),
@@ -412,6 +471,7 @@ impl Database {
                 connect: OnceLock::new(),
                 default_safe_integers: Mutex::new(false),
                 stmts: Mutex::new(Vec::new()),
+                sync_handler: OnceLock::new(),
             })),
         })
     }
@@ -454,6 +514,21 @@ impl Database {
             return Err(create_generic_error("database must be connected"));
         };
         Ok(conn.clone())
+    }
+
+    fn sync_handler(&self) -> napi::Result<Arc<TursoSyncHandler>> {
+        let inner = self.inner()?;
+        if let Some(handler) = inner.sync_handler.get() {
+            return Ok(handler.clone());
+        }
+
+        let handler = Arc::new(TursoSyncHandler::new(inner.path.clone(), self.conn()?));
+        let _ = inner.sync_handler.set(handler);
+        Ok(inner
+            .sync_handler
+            .get()
+            .expect("sync handler was initialized")
+            .clone())
     }
 
     /// Returns whether the database is in readonly-only mode.
@@ -570,6 +645,23 @@ impl Database {
     #[napi]
     pub fn in_transaction(&self) -> napi::Result<bool> {
         Ok(!self.conn()?.get_auto_commit())
+    }
+
+    /// Handle one sync protocol request using this database connection.
+    ///
+    /// The caller owns authentication, routing, and HTTP transport. Calls must
+    /// be serialized with other operations on this Database.
+    #[napi(ts_return_type = "Promise<SyncResponse>")]
+    pub fn handle_sync_request_async(
+        &self,
+        request: SyncRequest,
+    ) -> napi::Result<AsyncTask<SyncRequestTask>> {
+        Ok(AsyncTask::new(SyncRequestTask {
+            handler: self.sync_handler()?,
+            method: request.method,
+            path: request.path,
+            body: request.body.map_or_else(Vec::new, |body| body.to_vec()),
+        }))
     }
 
     /// Closes the database connection.

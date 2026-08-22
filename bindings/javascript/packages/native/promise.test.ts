@@ -22,6 +22,30 @@ test('drizzle-orm', async () => {
     }
 })
 
+test('handles sync protocol requests through the database binding', async () => {
+    const db = await connect(":memory:");
+
+    const options = await db.handleSyncRequest({ method: 'OPTIONS', path: '/pull-updates' });
+    expect(options.status).toBe(204);
+    expect(options.contentType).toBe('text/plain');
+    expect(options.body).toHaveLength(0);
+
+    const missing = await db.handleSyncRequest({ method: 'POST', path: '/missing' });
+    expect(missing.status).toBe(404);
+    expect(new TextDecoder().decode(missing.body)).toBe('Not Found');
+
+    await db.exec('CREATE TABLE synced(value TEXT)');
+    const pipeline = await db.handleSyncRequest({
+        method: 'POST',
+        path: '/v2/pipeline',
+        body: new TextEncoder().encode(JSON.stringify({
+            requests: [{ type: 'execute', stmt: { sql: "INSERT INTO synced VALUES ('yes')" } }],
+        })),
+    });
+    expect(pipeline.status).toBe(200);
+    expect(await db.all('SELECT value FROM synced')).toEqual([{ value: 'yes' }]);
+});
+
 test('in-memory-db-async', async () => {
     const db = await connect(":memory:");
     await db.exec("CREATE TABLE t(x)");

@@ -37,6 +37,7 @@ members = [
     "serverless/rust/differential",
     "sync/engine",
     "sync/sdk-kit",
+    "sync/server",
     "sql_generation",
     "testing/concurrent-simulator",
     "perf/throughput",
@@ -85,6 +86,7 @@ default-members = [
     "serverless/rust/differential",
     "sync/engine",
     "sync/sdk-kit",
+    "sync/server",
     "sql_generation",
     "testing/concurrent-simulator",
     "perf/throughput",
@@ -114,6 +116,7 @@ turso_sync_sdk_kit = { path = "sync/sdk-kit", version = "0.8.1" }
 limbo_completion = { path = "extensions/completion", version = "0.8.1" }
 turso_core = { path = "core", version = "0.8.1" }
 turso_sync_engine = { path = "sync/engine", version = "0.8.1" }
+turso_sync_server = { path = "sync/server" }
 turso_ext = { path = "extensions/core", version = "0.8.1" }
 turso_macros = { path = "macros", version = "0.8.1" }
 turso_parser = { path = "sqlite/parser", version = "0.8.1" }
