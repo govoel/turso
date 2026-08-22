@@ -1,5 +1,14 @@
-import { DatabasePromise, NativeDatabase, SqliteError, DatabaseOpts, EncryptionCipher, Transaction } from "@tursodatabase/database-common"
+import { DatabasePromise, NativeDatabase, SqliteError, DatabaseOpts as CommonDatabaseOpts, EncryptionCipher, Transaction } from "@tursodatabase/database-common"
 import { Database as NativeDB, EncryptionCipher as NativeEncryptionCipher } from "#index";
+
+export interface DatabaseOpts extends CommonDatabaseOpts {
+    /**
+     * Disable automatic WAL maintenance (auto-checkpoint and WAL header
+     * restart) at connect time. Required for databases served through
+     * `handleSyncRequest()` so sync revisions are never checkpointed away.
+     */
+    disableWalAutoActions?: boolean;
+}
 
 // Map string cipher names to native enum values (lazy to avoid errors if native module lacks encryption)
 function getCipherValue(cipher: EncryptionCipher): number {
@@ -18,7 +27,21 @@ function getCipherValue(cipher: EncryptionCipher): number {
     return cipherMap[cipher];
 }
 
+export interface SyncRequest {
+    method: string;
+    path: string;
+    body?: Uint8Array;
+}
+
+export interface SyncResponse {
+    status: number;
+    contentType: string;
+    body: Uint8Array;
+}
+
 class Database extends DatabasePromise {
+    readonly #native: NativeDB;
+
     constructor(path: string, opts: DatabaseOpts = {}) {
         const nativeOpts: any = { ...opts };
         if (opts.encryption) {
@@ -27,7 +50,29 @@ class Database extends DatabasePromise {
                 hexkey: opts.encryption.hexkey,
             };
         }
-        super(new NativeDB(path, nativeOpts) as unknown as NativeDatabase)
+        const native = new NativeDB(path, nativeOpts);
+        super(native as unknown as NativeDatabase)
+        this.#native = native;
+    }
+
+    /**
+     * Handles one Turso sync protocol request on this database connection.
+     *
+     * Authentication, database routing, and HTTP transport are intentionally
+     * left to the embedding application.
+     */
+    async handleSyncRequest(request: SyncRequest): Promise<SyncResponse> {
+        await this.connect();
+        await this.execLock.acquire();
+        try {
+            return await this.#native.handleSyncRequestAsync({
+                method: request.method,
+                path: request.path,
+                body: request.body,
+            });
+        } finally {
+            this.execLock.release();
+        }
     }
 }
 

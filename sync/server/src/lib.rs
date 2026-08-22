@@ -39,10 +39,71 @@ const MVCC_TX_TRAILER_SIZE: usize = 8;
 const MVCC_TX_FRAME_FLAG_HAS_EXTENSION_BLOCK: u32 = 1 << 0;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
 
-pub struct TursoSyncServer {
-    address: String,
+/// Handles Turso sync protocol requests for one database connection.
+///
+/// The handler is transport-independent so embedders can authenticate and route
+/// requests before handing the protocol payload to Turso.
+pub struct TursoSyncHandler {
     db_path: String,
     conn: Arc<Mutex<Arc<Connection>>>,
+}
+
+impl TursoSyncHandler {
+    pub fn new(db_path: String, conn: Arc<Connection>) -> Self {
+        // Sync revisions refer to WAL history, so automatic checkpoints must not
+        // discard that history behind connected clients.
+        conn.wal_auto_actions_disable();
+
+        Self {
+            db_path,
+            conn: Arc::new(Mutex::new(conn)),
+        }
+    }
+
+    /// Process one sync protocol request and return an HTTP-shaped response.
+    /// Authentication, routing, and transport remain the caller's responsibility.
+    pub fn handle_request(&self, method: &str, path: &str, body: &[u8]) -> HttpResponse {
+        info!("Request: {} {}", method, path);
+
+        let response = match (method, path) {
+            ("OPTIONS", _) => Ok(HttpResponse {
+                status: 204,
+                content_type: "text/plain".to_string(),
+                body: Vec::new(),
+            }),
+            ("POST", "/v2/pipeline") => {
+                debug!("Handling /v2/pipeline request");
+                self.handle_pipeline(body)
+            }
+            ("POST", "/pull-updates") => {
+                debug!("Handling /pull-updates request");
+                self.handle_pull_updates(body)
+            }
+            _ => {
+                info!("Unknown endpoint: {} {}", method, path);
+                Ok(HttpResponse {
+                    status: 404,
+                    content_type: "text/plain".to_string(),
+                    body: b"Not Found".to_vec(),
+                })
+            }
+        };
+
+        response.unwrap_or_else(|err| {
+            error!("Request error: {}", err);
+            HttpResponse {
+                status: 500,
+                content_type: "text/plain".to_string(),
+                body: format!("Internal Server Error: {err}").into_bytes(),
+            }
+        })
+    }
+}
+
+/// Minimal standalone HTTP transport used by the Turso CLI.
+pub struct TursoSyncServer {
+    address: String,
+    handler: TursoSyncHandler,
     interrupt_count: Arc<AtomicUsize>,
 }
 
@@ -53,12 +114,9 @@ impl TursoSyncServer {
         conn: Arc<Connection>,
         interrupt_count: Arc<AtomicUsize>,
     ) -> Result<Self> {
-        conn.wal_auto_actions_disable();
-
         Ok(Self {
             address,
-            db_path,
-            conn: Arc::new(Mutex::new(conn)),
+            handler: TursoSyncHandler::new(db_path, conn),
             interrupt_count,
         })
     }
@@ -150,51 +208,16 @@ impl TursoSyncServer {
         }
 
         let (method, path, body) = parse_http_request(&request_data)?;
-        info!("Request: {} {}", method, path);
-
-        let response = match (method.as_str(), path.as_str()) {
-            ("OPTIONS", _) => Ok(HttpResponse {
-                status: 204,
-                content_type: "text/plain".to_string(),
-                body: Vec::new(),
-            }),
-            ("POST", "/v2/pipeline") => {
-                debug!("Handling /v2/pipeline request");
-                self.handle_pipeline(&body)
-            }
-            ("POST", "/pull-updates") => {
-                debug!("Handling /pull-updates request");
-                self.handle_pull_updates(&body)
-            }
-            _ => {
-                info!("Unknown endpoint: {} {}", method, path);
-                Ok(HttpResponse {
-                    status: 404,
-                    content_type: "text/plain".to_string(),
-                    body: b"Not Found".to_vec(),
-                })
-            }
-        };
-
-        let http_response = match response {
-            Ok(resp) => resp,
-            Err(e) => {
-                error!("Request error: {}", e);
-                HttpResponse {
-                    status: 500,
-                    content_type: "text/plain".to_string(),
-                    body: format!("Internal Server Error: {e}").into_bytes(),
-                }
-            }
-        };
-
-        let response_bytes = format_http_response(&http_response);
+        let response = self.handler.handle_request(&method, &path, &body);
+        let response_bytes = format_http_response(&response);
         stream.write_all(&response_bytes)?;
         stream.flush()?;
 
         Ok(())
     }
+}
 
+impl TursoSyncHandler {
     fn handle_pipeline(&self, body: &[u8]) -> Result<HttpResponse> {
         let req: PipelineReqBody = serde_json::from_slice(body)
             .map_err(|e| anyhow!("Failed to parse pipeline request: {}", e))?;
@@ -871,10 +894,10 @@ impl TursoSyncServer {
     }
 }
 
-struct HttpResponse {
-    status: u16,
-    content_type: String,
-    body: Vec<u8>,
+pub struct HttpResponse {
+    pub status: u16,
+    pub content_type: String,
+    pub body: Vec<u8>,
 }
 
 struct MvccLogSnapshot {
