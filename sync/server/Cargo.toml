@@ -1,0 +1,25 @@
+[package]
+name = "turso_sync_server"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Transport-independent Turso database sync protocol server"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes = "1.11.1"
+crc32c = "0.6.8"
+prost = "0.14.1"
+roaring = "0.11.2"
+serde_json = "1.0"
+tracing.workspace = true
+turso_core = { workspace = true }
+turso_sync_engine = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.20"

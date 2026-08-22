@@ -86,6 +86,13 @@ export declare class Database {
    */
   inTransaction(): boolean
   /**
+   * Handle one sync protocol request using this database connection.
+   *
+   * The caller owns authentication, routing, and HTTP transport. Calls must
+   * be serialized with other operations on this Database.
+   */
+  handleSyncRequestAsync(request: SyncRequest): Promise<SyncResponse>
+  /**
    * Closes the database connection.
    *
    * # Returns
@@ -174,6 +181,12 @@ export interface DatabaseOpts {
   experimental?: Array<string>
   /** Optional encryption configuration for local database encryption */
   encryption?: EncryptionOpts
+  /**
+   * Disable automatic WAL maintenance (auto-checkpoint and WAL header
+   * restart) at connect time. Required for databases served through
+   * `handleSyncRequest()` so sync revisions are never checkpointed away.
+   */
+  disableWalAutoActions?: boolean
 }
 
 /** Supported encryption ciphers for local database encryption. */
@@ -197,6 +210,18 @@ export interface EncryptionOpts {
 
 export interface QueryOptions {
   queryTimeout?: number
+}
+
+export interface SyncRequest {
+  method: string
+  path: string
+  body?: Buffer
+}
+
+export interface SyncResponse {
+  status: number
+  contentType: string
+  body: Buffer
 }
 
 export interface TableColumn {

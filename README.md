@@ -1,3 +1,56 @@
+# Voel fork maintenance
+
+The `govoel/turso` default branch has one invariant: it is exactly one Voel
+patch commit on top of an upstream Turso release commit. Do not merge upstream
+`main`, add drive-by fixes, or stack commits on this branch.
+
+To move to a new Turso release:
+
+```sh
+git fetch upstream --tags
+old_patch=$(git rev-parse origin/main)
+git switch --detach <upstream-release-tag>^{commit}
+git cherry-pick "$old_patch"
+# Resolve conflicts and run the validations below.
+git push --force-with-lease origin HEAD:main
+```
+
+The cherry-pick creates the new patch commit. Verify the invariant before
+pushing:
+
+```sh
+test "$(git rev-list --count <upstream-release-tag>^{commit}..HEAD)" = 1
+test "$(git rev-parse HEAD^)" = "$(git rev-parse <upstream-release-tag>^{commit})"
+```
+
+Validate the affected packages:
+
+```sh
+cargo fmt --all -- --check
+cargo check -p turso_cli -p turso_node -p turso_sync_server
+cargo test -p turso_sync_server
+cargo clippy -p turso_node -p turso_sync_server --all-targets
+
+cd bindings/javascript
+yarn install --immutable
+yarn workspace @tursodatabase/database-common build
+yarn workspace @tursodatabase/database napi-build
+yarn workspace @tursodatabase/database tsc-build
+yarn workspace @tursodatabase/database test promise.test.ts
+```
+
+To publish the JavaScript binding, tag the patch commit with the matching Voel
+release tag and push it:
+
+```sh
+git tag voel-v<upstream-version> HEAD
+git push origin voel-v<upstream-version>
+```
+
+The NAPI workflow publishes `@govoel/turso-database` and its generated platform
+packages to GitHub Packages. It changes the package scope only in the publish
+job, so the fork patch does not need to carry generated package metadata.
+
 <p align="center">
   <img src="assets/turso.png" alt="Turso Database" width="800"/>
   <h1 align="center">Turso Database</h1>

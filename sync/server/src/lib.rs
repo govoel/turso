@@ -67,53 +67,61 @@ enum DbSource {
     },
 }
 
-pub struct TursoSyncServer {
-    address: String,
+/// Handles Turso sync protocol requests independently of the HTTP transport.
+pub struct TursoSyncHandler {
     source: DbSource,
-    interrupt_count: Arc<AtomicUsize>,
 }
 
-impl TursoSyncServer {
-    pub fn new(
-        address: String,
-        db_path: String,
-        conn: Arc<Connection>,
-        interrupt_count: Arc<AtomicUsize>,
-    ) -> Result<Self> {
+impl TursoSyncHandler {
+    pub fn new(db_path: String, conn: Arc<Connection>) -> Self {
+        // Sync revisions refer to WAL history, so automatic checkpoints must not
+        // discard that history behind connected clients.
         conn.wal_auto_actions_disable();
-
-        Ok(Self {
-            address,
+        Self {
             source: DbSource::Single(Arc::new(DbHandle {
                 conn: Mutex::new(conn),
                 path: db_path,
             })),
-            interrupt_count,
-        })
+        }
     }
 
-    pub fn new_dir(
-        address: String,
-        base: PathBuf,
-        interrupt_count: Arc<AtomicUsize>,
-        config: OpenConfig,
-    ) -> Result<Self> {
-        if !base.is_dir() {
-            return Err(anyhow!(
-                "sync dir path does not exist or is not a directory: {}",
-                base.display()
-            ));
-        }
-        let open_handles = Mutex::new(OpenHandles::new(config.max_open));
-        Ok(Self {
-            address,
-            source: DbSource::Dir {
-                base: base.canonicalize()?,
-                config,
-                open_handles,
+    /// Authentication, routing, and transport remain the caller's responsibility.
+    pub fn handle_request(&self, method: &str, path: &str, body: &[u8]) -> HttpResponse {
+        info!("Request: {} {}", method, path);
+
+        let response = match parse_route(method, path) {
+            Route::Options => Ok(text_response(204, "")),
+            Route::Pipeline { db } => match self.resolve_db(db) {
+                Ok(handle) => {
+                    debug!("Handling /v2/pipeline request");
+                    self.handle_pipeline(&handle, body)
+                }
+                Err(resp) => Ok(resp),
             },
-            interrupt_count,
-        })
+            Route::PullUpdates { db } => match self.resolve_db(db) {
+                Ok(handle) => {
+                    debug!("Handling /pull-updates request");
+                    self.handle_pull_updates(&handle, body)
+                }
+                Err(resp) => Ok(resp),
+            },
+            Route::NotFound => {
+                info!("Unknown endpoint: {} {}", method, path);
+                Ok(text_response(404, "Not Found"))
+            }
+        };
+
+        match response {
+            Ok(resp) => resp,
+            Err(e) => {
+                error!("Request error: {}", e);
+                HttpResponse {
+                    status: 500,
+                    content_type: "text/plain".to_string(),
+                    body: format!("Internal Server Error: {e}").into_bytes(),
+                }
+            }
+        }
     }
 
     fn resolve_db(
@@ -166,6 +174,54 @@ impl TursoSyncServer {
                 })
             }
         }
+    }
+}
+
+/// Minimal standalone HTTP transport used by the Turso CLI.
+pub struct TursoSyncServer {
+    address: String,
+    handler: TursoSyncHandler,
+    interrupt_count: Arc<AtomicUsize>,
+}
+
+impl TursoSyncServer {
+    pub fn new(
+        address: String,
+        db_path: String,
+        conn: Arc<Connection>,
+        interrupt_count: Arc<AtomicUsize>,
+    ) -> Result<Self> {
+        Ok(Self {
+            address,
+            handler: TursoSyncHandler::new(db_path, conn),
+            interrupt_count,
+        })
+    }
+
+    pub fn new_dir(
+        address: String,
+        base: PathBuf,
+        interrupt_count: Arc<AtomicUsize>,
+        config: OpenConfig,
+    ) -> Result<Self> {
+        if !base.is_dir() {
+            return Err(anyhow!(
+                "sync dir path does not exist or is not a directory: {}",
+                base.display()
+            ));
+        }
+        let open_handles = Mutex::new(OpenHandles::new(config.max_open));
+        Ok(Self {
+            address,
+            handler: TursoSyncHandler {
+                source: DbSource::Dir {
+                    base: base.canonicalize()?,
+                    config,
+                    open_handles,
+                },
+            },
+            interrupt_count,
+        })
     }
 
     pub fn run(&self) -> Result<()> {
@@ -255,49 +311,17 @@ impl TursoSyncServer {
         }
 
         let (method, path, body) = parse_http_request(&request_data)?;
-        info!("Request: {} {}", method, path);
+        let response = self.handler.handle_request(&method, &path, &body);
 
-        let response = match parse_route(&method, &path) {
-            Route::Options => Ok(text_response(204, "")),
-            Route::Pipeline { db } => match self.resolve_db(db) {
-                Ok(handle) => {
-                    debug!("Handling /v2/pipeline request");
-                    self.handle_pipeline(&handle, &body)
-                }
-                Err(resp) => Ok(resp),
-            },
-            Route::PullUpdates { db } => match self.resolve_db(db) {
-                Ok(handle) => {
-                    debug!("Handling /pull-updates request");
-                    self.handle_pull_updates(&handle, &body)
-                }
-                Err(resp) => Ok(resp),
-            },
-            Route::NotFound => {
-                info!("Unknown endpoint: {} {}", method, path);
-                Ok(text_response(404, "Not Found"))
-            }
-        };
-
-        let http_response = match response {
-            Ok(resp) => resp,
-            Err(e) => {
-                error!("Request error: {}", e);
-                HttpResponse {
-                    status: 500,
-                    content_type: "text/plain".to_string(),
-                    body: format!("Internal Server Error: {e}").into_bytes(),
-                }
-            }
-        };
-
-        let response_bytes = format_http_response(&http_response);
+        let response_bytes = format_http_response(&response);
         stream.write_all(&response_bytes)?;
         stream.flush()?;
 
         Ok(())
     }
+}
 
+impl TursoSyncHandler {
     fn handle_pipeline(&self, db: &DbHandle, body: &[u8]) -> Result<HttpResponse> {
         let req: PipelineReqBody = serde_json::from_slice(body)
             .map_err(|e| anyhow!("Failed to parse pipeline request: {}", e))?;
@@ -986,10 +1010,10 @@ impl TursoSyncServer {
     }
 }
 
-struct HttpResponse {
-    status: u16,
-    content_type: String,
-    body: Vec<u8>,
+pub struct HttpResponse {
+    pub status: u16,
+    pub content_type: String,
+    pub body: Vec<u8>,
 }
 
 struct MvccLogSnapshot {
@@ -1598,7 +1622,7 @@ mod tests {
 
         for i in 0..TEST_MAX_OPEN {
             let name = format!("db{i}");
-            if let Err(resp) = server.resolve_db(Some(&name)) {
+            if let Err(resp) = server.handler.resolve_db(Some(&name)) {
                 panic!(
                     "opening {name} under the cap must succeed, got {}",
                     resp.status
@@ -1607,10 +1631,10 @@ mod tests {
         }
 
         assert!(
-            server.resolve_db(Some("db0")).is_ok(),
+            server.handler.resolve_db(Some("db0")).is_ok(),
             "an already open database stays reachable at capacity"
         );
-        let Err(refused) = server.resolve_db(Some("overflow")) else {
+        let Err(refused) = server.handler.resolve_db(Some("overflow")) else {
             panic!("a full open map must refuse an unknown database");
         };
         assert_eq!(refused.status, 503);
@@ -1630,7 +1654,7 @@ mod tests {
         std::os::windows::fs::symlink_dir(outside.path(), base.path().join("escaped")).unwrap();
 
         let server = dir_server(base.path());
-        let Err(refused) = server.resolve_db(Some("escaped")) else {
+        let Err(refused) = server.handler.resolve_db(Some("escaped")) else {
             panic!("a symlinked database directory must be refused");
         };
         assert_eq!(refused.status, 404);
